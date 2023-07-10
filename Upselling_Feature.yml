@@ -1,0 +1,109 @@
+version: 2
+
+models:
+  - name: DBT_Pro_1
+    description: This table contains the data we collected for the upselling feature 
+    materialized: incremental
+
+    columns:
+      - name: ORDER_CREATION_DATE
+        description: Order creation date
+        tests:
+          - not_null
+          - accepted_values: ['date']
+
+      - name: CONFIRMATION_DATE
+        description: Confirmation date
+        tests:
+          - not_null
+          - accepted_values: ['date']
+
+      - name: COUNTRY
+        description: Country
+        tests:
+          - not_null
+          - accepted_values: ['varchar']
+
+      - name: ORDER_ID
+        description: Order ID
+        tests:
+          - not_null
+          - accepted_values: ['varchar']
+
+      - name: ORDER_STATUS
+        description: Order status
+        tests:
+          - not_null
+          - accepted_values: ['varchar']
+
+      - name: AGENT_ID
+        description: Agent ID
+        tests:
+          - not_null
+          - accepted_values: ['int']
+
+      - name: AGENT_NAME
+        description: Agent name
+        tests:
+          - not_null
+          - accepted_values: ['varchar']
+
+      - name: Confirmation_Channel
+        description: Confirmation channel
+        tests:
+          - not_null
+          - accepted_values: ['varchar']
+
+      - name: Rejection_Channel
+        description: Rejection channel
+        tests:
+          - not_null
+          - accepted_values: ['varchar']
+
+      - name: Suspention_Channel
+        description: Suspension channel
+        tests:
+          - not_null
+          - accepted_values: ['varchar']
+
+      - name: IS_UPSELLABLE
+        description: Is upsellable
+        tests:
+          - not_null
+          - accepted_values: ['boolean']
+
+      - name: UPSELLING_TRIED
+        description: Upselling tried
+        tests:
+          - not_null
+          - accepted_values: ['boolean']
+
+      - name: BASE_NO_OF_PRODS
+        description: Base number of products
+        tests:
+          - not_null
+          - accepted_values: ['int']
+
+      - name: BASE_NO_OF_PIECES
+        description: Base number of pieces
+        tests:
+          - not_null
+          - accepted_values: ['int']
+
+      - name: US_NO_OF_PRODS
+        description: Upsell number of products
+        tests:
+          - not_null
+          - accepted_values: ['int']
+
+      - name: US_NO_OF_PIECES
+        description: Upsell number of pieces
+        tests:
+          - not_null
+          - accepted_values: ['int']
+          
+      - name: UPSELLING_STATUS
+        description: Upselling status
+        tests:
+          - not_null
+          - accepted_values: ['varchar']

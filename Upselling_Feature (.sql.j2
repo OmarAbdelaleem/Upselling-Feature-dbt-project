@@ -1,0 +1,137 @@
+{{
+    config(
+        schema = 'upselling_schema',
+        alias = 'regional_sales_performance',
+        materialized = 'incremental',
+        tags = ["tag"]
+    )
+}}
+
+-- Retrieve the sales data
+WITH SALES AS (
+    SELECT
+        O.ORDER_DATE::date AS ORDER_DATE,
+        (O.PAYLOAD:"orderID")::varchar AS ORDER_ID,
+        (O.PAYLOAD:"status")::varchar AS ORDER_STATUS,
+        (O.PAYLOAD:"sourceChannel")::varchar AS SOURCE_CHANNEL,
+        (O.PAYLOAD:"paymentMethod")::varchar AS PAYMENT_METHOD,
+        (OL.VALUE:"orderLineId")::varchar AS ORDERLINE_ID,
+        (O.PAYLOAD:"assignedSalesRep":"repId")::varchar AS SALES_REP_ID,
+        (O.PAYLOAD:"assignedSalesRep":"name")::varchar AS SALES_REP_NAME,
+        (OL.VALUE:"productId")::varchar AS PRODUCT_ID,
+        (OL.VALUE:"status")::varchar AS ORDERLINE_STATUS,
+        (OL.VALUE:"quantity")::number AS PRODUCT_QUANTITY,
+        (E.VALUE:"eventType")::varchar AS EVENT_TYPE,
+        (O.PAYLOAD:"isUpsellAttempted")::varchar AS UPSELL_ATTEMPTED,
+        (O.PAYLOAD:"hasUpsellableProducts")::varchar AS HAS_UPSELLABLE_PRODUCTS,
+        (O.PAYLOAD:"country")::varchar AS COUNTRY,
+        to_timestamp_tz(
+            (O.PAYLOAD:"orderDate":"$date")::varchar::numeric / 1000
+        ) AS ORDER_TIMESTAMP,
+        to_timestamp_tz(
+            (O.PAYLOAD:"updatedAt":"$date")::varchar::numeric / 1000
+        ) AS UPDATED_TIMESTAMP
+    FROM
+        {{ source('your_database', 'your_sales_table') }} AS O,
+        LATERAL FLATTEN(PAYLOAD:"events") AS E,
+        LATERAL FLATTEN(E.VALUE:"orderLines") AS OL
+    WHERE
+        ORDER_STATUS NOT IN ('cancelled', 'returned')
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY
+            ORDER_ID,
+            ORDERLINE_ID,
+            ORDERLINE_STATUS
+        ORDER BY
+            O.UPDATED_TIMESTAMP DESC
+    ) = 1
+),
+SALES_REPS AS (
+    SELECT
+        (PAYLOAD:"_id":"$oid")::varchar AS SALES_REP_OBJECT_ID,
+        (PAYLOAD:"salesRepID")::number AS SALES_REP_ID,
+        (PAYLOAD:"firstName")::varchar AS SALES_REP_FIRST_NAME,
+        ROW_NUMBER() OVER (PARTITION BY SALES_REP_OBJECT_ID ORDER BY UPDATED_TIMESTAMP DESC) AS RN
+    FROM
+        {{ source('your_database', 'your_sales_reps_table') }}
+),
+ORDER_ACTIVITIES AS (
+    SELECT
+        OA.CREATED_TIMESTAMP,
+        OA.UPDATED_TIMESTAMP,
+        SR.SALES_REP_ID AS SALES_REP_ID,
+        SR.SALES_REP_FIRST_NAME AS SALES_REP_FIRST_NAME,
+        SR.SALES_REP_OBJECT_ID,
+        (OA.PAYLOAD:"orderID")::varchar AS ORDER_ID,
+        (OA.PAYLOAD:"orderStatus")::varchar AS ORDER_STATUS,
+        (OA.PAYLOAD:"failedAttemptsCount")::number AS FAILED_ATTEMPTS_COUNT,
+        (OA.PAYLOAD:"adminUserId":"$oid")::varchar AS ADMIN_OBJECT_ID
+    FROM
+        {{ source('your_database', 'your_order_activities_table') }} AS OA
+    LEFT JOIN
+        SALES_REPS AS SR
+        ON
+            SR.SALES_REP_OBJECT_ID = (OA.PAYLOAD:"adminUserId":"$oid")::varchar
+            AND SR.RN = 1
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY ORDER_ID
+        ORDER BY
+            OA.UPDATED_TIMESTAMP DESC
+    ) = 1
+)
+SELECT
+    SALES.ORDER_DATE::date AS ORDER_DATE,
+    SALES.ORDER_TIMESTAMP::date AS ORDER_TIMESTAMP,
+    SALES.COUNTRY,
+    SALES.ORDER_ID,
+    SALES.ORDER_STATUS,
+    COALESCE(OA.SALES_REP_ID, -1) AS SALES_REP_ID,
+    COALESCE(OA.SALES_REP_FIRST_NAME, 'unknown') AS SALES_REP_FIRST_NAME,
+    CASE
+        WHEN SALES.SOURCE_CHANNEL = '1' THEN 'Online Store'
+        WHEN SALES.SOURCE_CHANNEL = '2' THEN 'Physical Store'
+        WHEN SALES.SOURCE_CHANNEL = '3' THEN 'Phone Order'
+    END AS SOURCE_CHANNEL,
+    CASE
+        WHEN SALES.REJECTION_CHANNEL = '1' THEN 'Email'
+        WHEN SALES.REJECTION_CHANNEL = '2' THEN 'Phone'
+        WHEN SALES.REJECTION_CHANNEL = '3' THEN 'Other'
+    END AS REJECTION_CHANNEL,
+    CASE
+        WHEN SALES.UPSELL_ATTEMPTED = '1' THEN 'Yes'
+        ELSE 'No'
+    END AS UPSELL_ATTEMPTED,
+    COUNT(DISTINCT CASE WHEN SALES.ORDERLINE_STATUS = 'created' THEN SALES.PRODUCT_ID END) AS BASE_NO_OF_PRODS,
+    SUM(CASE WHEN SALES.ORDERLINE_STATUS = 'created' THEN SALES.PRODUCT_QUANTITY ELSE 0 END) AS BASE_NO_OF_PIECES,
+    COUNT(DISTINCT CASE WHEN SALES.ORDERLINE_STATUS = 'confirmed' THEN SALES.PRODUCT_ID END) AS US_NO_OF_PRODS,
+    SUM(CASE WHEN SALES.ORDERLINE_STATUS = 'confirmed' THEN SALES.PRODUCT_QUANTITY ELSE 0 END) AS US_NO_OF_PIECES,
+    CASE
+        WHEN SUM(CASE WHEN SALES.ORDERLINE_STATUS = 'confirmed' THEN SALES.PRODUCT_QUANTITY ELSE 0 END) > SUM(CASE WHEN SALES.ORDERLINE_STATUS = 'created' THEN SALES.PRODUCT_QUANTITY ELSE 0 END) THEN 'ACCEPTED'
+        WHEN SALES.UPSELL_ATTEMPTED = '1' AND SUM(CASE WHEN SALES.ORDERLINE_STATUS = 'confirmed' THEN SALES.PRODUCT_QUANTITY ELSE 0 END) = SUM(CASE WHEN SALES.ORDERLINE_STATUS = 'created' THEN SALES.PRODUCT_QUANTITY ELSE 0 END) THEN 'FAILED'
+        WHEN SALES.UPSELL_ATTEMPTED = '1' AND SUM(CASE WHEN SALES.ORDERLINE_STATUS = 'confirmed' THEN SALES.PRODUCT_QUANTITY ELSE 0 END) < SUM(CASE WHEN SALES.ORDERLINE_STATUS = 'created' THEN SALES.PRODUCT_QUANTITY ELSE 0 END) THEN 'CRUCIAL FAILURE'
+        WHEN SALES.HAS_UPSELLABLE_PRODUCTS = '1' AND SALES.UPSELL_ATTEMPTED != '1' THEN 'NO TRIAL'
+        ELSE 'NOT UPSELLABLE'
+    END AS UPSELLING_STATUS
+FROM
+    SALES
+LEFT JOIN ORDER_ACTIVITIES AS OA ON OA.ORDER_ID = SALES.ORDER_ID
+GROUP BY
+    SRC.ORDER_CREATION_DATE,
+    SRC.CONFIRMATION_DATE,
+    SRC.ORDER_ID,
+    SRC.ORDER_STATUS,
+    OA.AGENT_ID,
+    OA.AGENT_NAME,
+    SRC.Rejection_Channel,
+    SRC.Suspention_Channel,
+    SRC.UPSELLING_TRIED,
+    SRC.HAS_UPSELLABLE_PRODUCTS,
+    SRC.COUNTRY,
+    SRC.Confirmation_Channel,
+    SRC.Rejection_Channel,
+    SRC.Suspention_Channel,
+    SRC.UPDATED_DATE
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY SRC.ORDER_ID
+    ORDER BY SRC.UPDATED_DATE DESC
+) = 1;
